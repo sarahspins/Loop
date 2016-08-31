@@ -7,10 +7,10 @@
 //
 
 import Foundation
-import AmplitudeFramework
+import Amplitude
 
 
-class AnalyticsManager {
+final class AnalyticsManager {
 
     var amplitudeService: AmplitudeService {
         didSet {
@@ -19,14 +19,8 @@ class AnalyticsManager {
     }
 
     init() {
-        // Migrate RemoteSettings.plist to the Keychain
-        let keychain = KeychainManager()
-
-        if let APIKey = keychain.getAmplitudeAPIKey() {
+        if let APIKey = KeychainManager().getAmplitudeAPIKey() {
             amplitudeService = AmplitudeService(APIKey: APIKey)
-        } else if let settings = NSBundle.mainBundle().remoteSettings, key = settings["AmplitudeAPIKey"] where !key.isEmpty {
-            try! keychain.setAmplitudeAPIKey(key)
-            amplitudeService = AmplitudeService(APIKey: key)
         } else {
             amplitudeService = AmplitudeService(APIKey: nil)
         }
@@ -75,6 +69,14 @@ class AnalyticsManager {
 
     func transmitterTimeDidDrift(drift: NSTimeInterval) {
         logEvent("Transmitter time change", withProperties: ["value" : drift])
+    }
+
+    func pumpBatteryWasReplaced() {
+        logEvent("Pump battery replacement")
+    }
+
+    func reservoirWasRewound() {
+        logEvent("Pump reservoir rewind")
     }
 
     func didChangeBasalRateSchedule() {

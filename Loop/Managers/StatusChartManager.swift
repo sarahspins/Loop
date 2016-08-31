@@ -16,7 +16,7 @@ import LoopKit
 import SwiftCharts
 
 
-class StatusChartsManager {
+final class StatusChartsManager {
 
     // MARK: - Configuration
 
@@ -69,27 +69,33 @@ class StatusChartsManager {
 
     var startDate = NSDate()
 
+    var glucoseUnit: HKUnit = HKUnit.milligramsPerDeciliterUnit()
+
     var glucoseTargetRangeSchedule: GlucoseRangeSchedule?
 
     var glucoseValues: [GlucoseValue] = [] {
         didSet {
-            glucosePoints = glucoseValues.map({
+            let unitString = glucoseUnit.glucoseUnitDisplayString
+
+            glucosePoints = glucoseValues.map {
                 return ChartPoint(
                     x: ChartAxisValueDate(date: $0.startDate, formatter: dateFormatter),
-                    y: ChartAxisValueDouble($0.quantity.doubleValueForUnit(HKUnit.milligramsPerDeciliterUnit()))
+                    y: ChartAxisValueDoubleUnit($0.quantity.doubleValueForUnit(glucoseUnit), unitString: unitString)
                 )
-            })
+            }
         }
     }
 
     var predictedGlucoseValues: [GlucoseValue] = [] {
         didSet {
-            predictedGlucosePoints = predictedGlucoseValues.map({
+            let unitString = glucoseUnit.glucoseUnitDisplayString
+
+            predictedGlucosePoints = predictedGlucoseValues.map {
                 return ChartPoint(
                     x: ChartAxisValueDate(date: $0.startDate, formatter: dateFormatter),
-                    y: ChartAxisValueDouble($0.quantity.doubleValueForUnit(HKUnit.milligramsPerDeciliterUnit()), formatter: integerFormatter)
+                    y: ChartAxisValueDoubleUnit($0.quantity.doubleValueForUnit(glucoseUnit), unitString: unitString, formatter: integerFormatter)
                 )
-            })
+            }
         }
     }
 
@@ -98,7 +104,7 @@ class StatusChartsManager {
             IOBPoints = IOBValues.map {
                 return ChartPoint(
                     x: ChartAxisValueDate(date: $0.startDate, formatter: dateFormatter),
-                    y: ChartAxisValueDouble($0.value, formatter: decimalFormatter)
+                    y: ChartAxisValueDoubleUnit($0.value, unitString: "U", formatter: decimalFormatter)
                 )
             }
         }
@@ -106,10 +112,13 @@ class StatusChartsManager {
 
     var COBValues: [CarbValue] = [] {
         didSet {
+            let unit = HKUnit.gramUnit()
+            let unitString = unit.unitString
+
             COBPoints = COBValues.map {
                 ChartPoint(
                     x: ChartAxisValueDate(date: $0.startDate, formatter: dateFormatter),
-                    y: ChartAxisValueDouble($0.quantity.doubleValueForUnit(HKUnit.gramUnit()), formatter: integerFormatter)
+                    y: ChartAxisValueDoubleUnit($0.quantity.doubleValueForUnit(unit), unitString: unitString, formatter: integerFormatter)
                 )
             }
         }
@@ -118,11 +127,11 @@ class StatusChartsManager {
     var doseEntries: [DoseEntry] = [] {
         didSet {
             dosePoints = doseEntries.reduce([], combine: { (points, entry) -> [ChartPoint] in
-                if entry.unit == .UnitsPerHour {
+                if entry.unit == .unitsPerHour {
                     let startX = ChartAxisValueDate(date: entry.startDate, formatter: dateFormatter)
                     let endX = ChartAxisValueDate(date: entry.endDate, formatter: dateFormatter)
                     let zero = ChartAxisValueInt(0)
-                    let value = ChartAxisValueDoubleLog(actualDouble: entry.value, formatter: decimalFormatter)
+                    let value = ChartAxisValueDoubleLog(actualDouble: entry.value, unitString: "U/hour", formatter: decimalFormatter)
 
                     let newPoints = [
                         ChartPoint(x: startX, y: zero),
@@ -156,6 +165,18 @@ class StatusChartsManager {
     }
 
     private var targetGlucosePoints: [ChartPoint] = [] {
+        didSet {
+            glucoseChart = nil
+        }
+    }
+
+    private var targetOverridePoints: [ChartPoint] = [] {
+        didSet {
+            glucoseChart = nil
+        }
+    }
+
+    private var targetOverrideDurationPoints: [ChartPoint] = [] {
         didSet {
             glucoseChart = nil
         }
@@ -202,6 +223,14 @@ class StatusChartsManager {
 
     private var doseChart: Chart?
 
+    private var glucoseChartCache: ChartPointsTouchHighlightLayerViewCache?
+
+    private var IOBChartCache: ChartPointsTouchHighlightLayerViewCache?
+
+    private var COBChartCache: ChartPointsTouchHighlightLayerViewCache?
+
+    private var doseChartCache: ChartPointsTouchHighlightLayerViewCache?
+
     // MARK: - Generators
 
     func glucoseChartWithFrame(frame: CGRect) -> Chart? {
@@ -223,8 +252,15 @@ class StatusChartsManager {
 
         let allPoints = glucosePoints + predictedGlucosePoints
 
-        // TODO: The segment/multiple values are unit-specific
-        let yAxisValues = ChartAxisValuesGenerator.generateYAxisValuesWithChartPoints(allPoints + targetGlucosePoints, minSegmentCount: 2, maxSegmentCount: 4, multiple: 25, axisValueGenerator: { ChartAxisValueDouble($0, labelSettings: self.axisLabelSettings) }, addPaddingSegmentIfEdge: true)
+        let yAxisValues = ChartAxisValuesGenerator.generateYAxisValuesWithChartPoints(allPoints + targetGlucosePoints + targetOverridePoints,
+            minSegmentCount: 2,
+            maxSegmentCount: 4,
+            multiple: glucoseUnit.glucoseUnitYAxisSegmentSize,
+            axisValueGenerator: {
+                ChartAxisValueDouble($0, labelSettings: self.axisLabelSettings)
+            },
+            addPaddingSegmentIfEdge: true
+        )
 
         let yAxisModel = ChartAxisModel(axisValues: yAxisValues, lineColor: axisLineColor)
 
@@ -236,7 +272,21 @@ class StatusChartsManager {
         var targetLayer: ChartPointsAreaLayer? = nil
 
         if targetGlucosePoints.count > 1 {
-            targetLayer = ChartPointsAreaLayer(xAxis: xAxis, yAxis: yAxis, innerFrame: innerFrame, chartPoints: targetGlucosePoints, areaColor: UIColor.glucoseTintColor.colorWithAlphaComponent(0.3), animDuration: 0, animDelay: 0, addContainerPoints: false)
+            let alpha: CGFloat = targetOverridePoints.count > 1 ? 0.15 : 0.3
+
+            targetLayer = ChartPointsAreaLayer(xAxis: xAxis, yAxis: yAxis, innerFrame: innerFrame, chartPoints: targetGlucosePoints, areaColor: UIColor.glucoseTintColor.colorWithAlphaComponent(alpha), animDuration: 0, animDelay: 0, addContainerPoints: false)
+        }
+
+        var targetOverrideLayer: ChartPointsAreaLayer? = nil
+
+        if targetOverridePoints.count > 1 {
+            targetOverrideLayer = ChartPointsAreaLayer(xAxis: xAxis, yAxis: yAxis, innerFrame: innerFrame, chartPoints: targetOverridePoints, areaColor: UIColor.glucoseTintColor.colorWithAlphaComponent(0.3), animDuration: 0, animDelay: 0, addContainerPoints: false)
+        }
+
+        var targetOverrideDurationLayer: ChartPointsAreaLayer? = nil
+
+        if targetOverrideDurationPoints.count > 1 {
+            targetOverrideDurationLayer = ChartPointsAreaLayer(xAxis: xAxis, yAxis: yAxis, innerFrame: innerFrame, chartPoints: targetOverrideDurationPoints, areaColor: UIColor.glucoseTintColor.colorWithAlphaComponent(0.3), animDuration: 0, animDelay: 0, addContainerPoints: false)
         }
 
         let gridLayer = ChartGuideLinesLayer(xAxis: xAxis, yAxis: yAxis, innerFrame: innerFrame, axis: .XAndY, settings: guideLinesLayerSettings, onlyVisibleX: true, onlyVisibleY: false)
@@ -249,7 +299,7 @@ class StatusChartsManager {
             prediction = ChartPointsScatterCirclesLayer(xAxis: xAxis, yAxis: yAxis, innerFrame: innerFrame, chartPoints: predictedGlucosePoints, displayDelay: 0, itemSize: CGSize(width: 2, height: 2), itemFillColor: UIColor.glucoseTintColor.colorWithAlphaComponent(0.75))
         }
 
-        let highlightLayer = StatusChartHighlightLayer(
+        glucoseChartCache = ChartPointsTouchHighlightLayerViewCache(
             xAxis: xAxis,
             yAxis: yAxis,
             innerFrame: innerFrame,
@@ -262,9 +312,11 @@ class StatusChartsManager {
         let layers: [ChartLayer?] = [
             gridLayer,
             targetLayer,
+            targetOverrideLayer,
+            targetOverrideDurationLayer,
             xAxis,
             yAxis,
-            highlightLayer,
+            glucoseChartCache?.highlightLayer,
             prediction,
             circles
         ]
@@ -328,7 +380,7 @@ class StatusChartsManager {
             return v
         })
 
-        let highlightLayer = StatusChartHighlightLayer(
+        IOBChartCache = ChartPointsTouchHighlightLayerViewCache(
             xAxis: xAxis,
             yAxis: yAxis,
             innerFrame: innerFrame,
@@ -343,7 +395,7 @@ class StatusChartsManager {
             xAxis,
             yAxis,
             zeroGuidelineLayer,
-            highlightLayer,
+            IOBChartCache?.highlightLayer,
             IOBArea,
             IOBLine,
         ]
@@ -397,7 +449,7 @@ class StatusChartsManager {
         let gridLayer = ChartGuideLinesLayer(xAxis: xAxis, yAxis: yAxis, innerFrame: innerFrame, axis: .XAndY, settings: guideLinesLayerSettings, onlyVisibleX: true, onlyVisibleY: false)
 
 
-        let highlightLayer = StatusChartHighlightLayer(
+        COBChartCache = ChartPointsTouchHighlightLayerViewCache(
             xAxis: xAxis,
             yAxis: yAxis,
             innerFrame: innerFrame,
@@ -411,7 +463,7 @@ class StatusChartsManager {
             gridLayer,
             xAxis,
             yAxis,
-            highlightLayer,
+            COBChartCache?.highlightLayer,
             COBArea,
             COBLine
         ]
@@ -464,7 +516,7 @@ class StatusChartsManager {
             return v
         })
 
-        let highlightLayer = StatusChartHighlightLayer(
+        doseChartCache = ChartPointsTouchHighlightLayerViewCache(
             xAxis: xAxis,
             yAxis: yAxis,
             innerFrame: innerFrame,
@@ -479,7 +531,7 @@ class StatusChartsManager {
             xAxis,
             yAxis,
             zeroGuidelineLayer,
-            highlightLayer,
+            doseChartCache?.highlightLayer,
             doseArea,
             doseLine
         ]
@@ -498,8 +550,10 @@ class StatusChartsManager {
         let timeFormatter = NSDateFormatter()
         timeFormatter.dateFormat = "h a"
 
-        let xAxisValues = ChartAxisValuesGenerator.generateXAxisValuesWithChartPoints(points, minSegmentCount: 5, maxSegmentCount: 10, multiple: NSTimeInterval(hours: 1), axisValueGenerator: { ChartAxisValueDate(date: ChartAxisValueDate.dateFromScalar($0), formatter: timeFormatter, labelSettings: self.axisLabelSettings)
-            }, addPaddingSegmentIfEdge: false)
+        let minDate = startDate
+        let xAxisValues = ChartAxisValuesGenerator.generateXAxisValuesWithChartPoints(points, minSegmentCount: 5, maxSegmentCount: 10, multiple: NSTimeInterval(hours: 1), axisValueGenerator: {
+            ChartAxisValueDate(date: max(minDate, ChartAxisValueDate.dateFromScalar($0)), formatter: timeFormatter, labelSettings: self.axisLabelSettings)
+        }, addPaddingSegmentIfEdge: false)
         xAxisValues.first?.hidden = true
         xAxisValues.last?.hidden = true
 
@@ -516,6 +570,26 @@ class StatusChartsManager {
         if let xAxisValues = xAxisValues where xAxisValues.count > 1,
             let targets = glucoseTargetRangeSchedule {
             targetGlucosePoints = ChartPoint.pointsForGlucoseRangeSchedule(targets, xAxisValues: xAxisValues)
+
+            if let override = targets.temporaryOverride {
+                targetOverridePoints = ChartPoint.pointsForGlucoseRangeScheduleOverride(override, xAxisValues: xAxisValues)
+
+                targetOverrideDurationPoints = ChartPoint.pointsForGlucoseRangeScheduleOverrideDuration(override, xAxisValues: xAxisValues)
+            } else {
+                targetOverridePoints = []
+                targetOverrideDurationPoints = []
+            }
+        }
+    }
+}
+
+
+private extension HKUnit {
+    var glucoseUnitYAxisSegmentSize: Double {
+        if self == HKUnit.milligramsPerDeciliterUnit() {
+            return 25
+        } else {
+            return 1
         }
     }
 }
